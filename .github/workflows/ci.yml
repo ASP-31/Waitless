@@ -37,12 +37,22 @@ jobs:
         run: pnpm db:generate
         env:
           DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
+          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
+          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Lint
         run: pnpm lint
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
+          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
+          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Typecheck
         run: pnpm typecheck
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
+          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
+          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Test
         run: pnpm test
