@@ -14,9 +14,13 @@ jobs:
     name: Lint · typecheck · test · build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
+      JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
+      JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Enable pnpm
         uses: pnpm/action-setup@v4
@@ -24,7 +28,7 @@ jobs:
           version: 10.20.0
 
       - name: Use Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -35,36 +39,15 @@ jobs:
       - name: Generate Prisma client
         # `prisma generate` only needs the schema, not a database.
         run: pnpm db:generate
-        env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Lint
         run: pnpm lint
-        env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Typecheck
         run: pnpm typecheck
-        env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
 
       - name: Test
         run: pnpm test
-        env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
-
 
       - name: Build
         run: pnpm build
-        env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars

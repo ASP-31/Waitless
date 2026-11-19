@@ -76,8 +76,7 @@ function parseEnv(): Env {
       .map((issue) => `  • ${issue.path.join(".") || "(root)"}: ${issue.message}`)
       .join("\n");
     // Fail fast — a half-configured server is worse than a crashed one.
-    console.error(`Invalid environment configuration:\n${issues}\n\nSee .env.example.`);
-    process.exit(1);
+    throw new Error(`Invalid environment configuration:\n${issues}\n\nSee .env.example.`);
   }
   return result.data;
 }
