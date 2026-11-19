@@ -46,6 +46,11 @@ jobs:
 
       - name: Test
         run: pnpm test
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
+          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
+          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
+
 
       - name: Build
         run: pnpm build
