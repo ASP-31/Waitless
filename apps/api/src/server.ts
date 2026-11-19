@@ -5,12 +5,14 @@ import { logger } from "./config/logger";
 import { prisma } from "./config/prisma";
 import { redis } from "./config/redis";
 import { startMqttIntegration, stopMqttIntegration } from "./integrations/mqtt";
+import { startScheduler, stopScheduler } from "./jobs/scheduler";
 import { initSockets, shutdownSockets } from "./sockets";
 
 const app = createApp();
 const httpServer = createServer(app);
 
 initSockets(httpServer);
+startScheduler();
 startMqttIntegration();
 
 httpServer.listen(env.PORT, () => {
@@ -35,6 +37,7 @@ async function shutdown(signal: string): Promise<void> {
 
   try {
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    stopScheduler();
     await shutdownSockets();
     await stopMqttIntegration();
     await prisma.$disconnect();

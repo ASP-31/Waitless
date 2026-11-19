@@ -11,7 +11,7 @@ const param = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v
 
 queueRouter.get("/:doctorId", validate(queueQuerySchema, "query"), async (req, res, next) => {
   try {
-    const data = await getQueue(param(req.params.doctorId), (req.query as { date?: string }).date);
+    const data = await getQueue(param(req.params.doctorId), (req.query as { date?: string }).date, req.auth);
     res.json({ data });
   } catch (error) {
     next(error);

@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarDays, Plus, RefreshCw, Search, X } from "lucide-react";
+import { CalendarDays, Download, Plus, RefreshCw, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { ApiError, api } from "@/lib/api";
+import { ApiError, api, getAccessToken } from "@/lib/api";
 import { listDoctors, type Doctor } from "@/lib/admin-api";
 import { CardEmptyState } from "@/components/shared/empty-state";
 import { PageHeader } from "@/components/shared/page-header";
@@ -125,6 +125,30 @@ export function AdminAppointmentsPage() {
   });
   const refresh = async () => { await qc.invalidateQueries({ queryKey: ["appointments"] }); };
 
+  async function exportCsv() {
+    const params = new URLSearchParams({ date });
+    if (q) params.set("q", q);
+    if (doctorId !== "all") params.set("doctorId", doctorId);
+    if (status !== "all") params.set("status", status);
+    const base = import.meta.env.VITE_API_URL ?? "/api/v1";
+    const token = getAccessToken();
+    const response = await fetch(`${base}/appointments/export?${params.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
+    });
+    if (!response.ok) {
+      toast.error("Could not export appointments");
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `appointments-${date}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   const doctors = doctorsQ.data ?? [];
   const items = apptsQ.data ?? [];
 
@@ -135,6 +159,7 @@ export function AdminAppointmentsPage() {
         description="Search by token, name or phone; cancel or register walk-ins."
         actions={
           <div className="flex gap-2">
+            <Button variant="outline" onClick={() => void exportCsv()}><Download className="size-4" />Export CSV</Button>
             <Button variant="outline" onClick={() => void refresh()}><RefreshCw className="size-4" />Refresh</Button>
             {doctors.length > 0 && <WalkInDialog doctors={doctors} onDone={refresh} />}
           </div>

@@ -104,6 +104,7 @@ enum AuditAction {
   APPOINTMENT_RESCHEDULED
   APPOINTMENT_CHECKED_IN
   QUEUE_CALLED
+  QUEUE_DELAYED
   QUEUE_STARTED
   QUEUE_COMPLETED
   QUEUE_SKIPPED
@@ -309,7 +310,8 @@ model Appointment {
   swapsAsRequester SwapRequest[] @relation("SwapRequesterAppointment")
   swapsAsTarget    SwapRequest[] @relation("SwapTargetAppointment")
 
-  @@unique([doctorId, slotStart])
+  // Slot uniqueness is a partial unique index created in migration SQL so
+  // cancelled/no-show rows do not permanently block a slot from being rebooked.
   @@unique([doctorId, serviceDay, tokenNumber])
   @@index([patientId, status])
   @@index([doctorId, serviceDay, status])

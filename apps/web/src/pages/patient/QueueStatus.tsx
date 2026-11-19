@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
-import { BellRing, Clock3, ListOrdered, MapPin, Timer, Users } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { BellRing, CheckCircle2, Clock3, ListOrdered, MapPin, Timer, Users } from "lucide-react";
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { api } from "@/lib/api";
+import { toast } from "sonner";
+import { ApiError, api } from "@/lib/api";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ type QueueData = { entries: QueueEntry[]; currentPatient: QueueEntry | null; sta
 const ACTIVE = new Set(["BOOKED", "WAITING", "NOTIFIED", "CALLED", "IN_CONSULTATION", "DELAYED"]);
 
 export function QueueStatusPage() {
+  const qc = useQueryClient();
   const apptsQ = useQuery({
     queryKey: ["appointments", "me", "queue"],
     queryFn: async () => (await api.get<{ data: { appointments: Appointment[] } }>("/appointments?pageSize=50")).data.appointments,
@@ -33,6 +35,23 @@ export function QueueStatusPage() {
   const nowServing = queueQ.data?.currentPatient?.appointment.tokenNumber ?? null;
   const patientsAhead = queueQ.data && myEntry ? queueQ.data.entries.filter((e) => e.position < myEntry.position && !["COMPLETED", "SKIPPED"].includes(e.status)).length : null;
   const eta = myEntry?.estimatedStartAt ? new Date(myEntry.estimatedStartAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : null;
+  const today = new Date().toISOString().slice(0, 10);
+  const canCheckIn =
+    !!active &&
+    active.serviceDay === today &&
+    ["BOOKED", "WAITING", "NOTIFIED", "CALLED", "DELAYED", "SKIPPED"].includes(active.status);
+
+  const checkIn = useMutation({
+    mutationFn: async () => api.post(`/appointments/${active!.id}/check-in`),
+    onSuccess: () => {
+      toast.success("You're checked in. Watch this screen for your turn.");
+      void qc.invalidateQueries({ queryKey: ["appointments"] });
+      void qc.invalidateQueries({ queryKey: ["queue"] });
+    },
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : "Could not check in. Please try again.");
+    },
+  });
 
   return (
     <div className="space-y-6">
@@ -86,13 +105,24 @@ export function QueueStatusPage() {
                 <Button size="sm" asChild><Link to="/patient/book">Book a visit</Link></Button>
               </div>
             ) : (
-              <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
+              <div className="space-y-3 rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
                 {myEntry ? (
                   <p>You are at position <span className="font-medium text-foreground">{myEntry.position}</span> in the queue. Status: <span className="font-medium text-foreground">{myEntry.status.replace(/_/g, " ")}</span>.</p>
                 ) : queueQ.isLoading ? (
                   <p>Loading live queue…</p>
                 ) : (
                   <p>Your appointment is active. Queue details will appear when today&apos;s queue is prepared.</p>
+                )}
+                {canCheckIn && (
+                  <Button
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => checkIn.mutate()}
+                    disabled={checkIn.isPending}
+                  >
+                    <CheckCircle2 className="size-4" />
+                    {checkIn.isPending ? "Checking in…" : "I'm here"}
+                  </Button>
                 )}
               </div>
             )}
@@ -118,7 +148,7 @@ export function QueueStatusPage() {
           <Card className="bg-primary/5">
             <CardContent className="space-y-2 p-4">
               <p className="flex items-center gap-2 text-sm font-medium"><BellRing className="size-4 text-primary" />Live updates</p>
-              <p className="text-xs leading-relaxed text-muted-foreground">This view refreshes periodically. Realtime push updates are being rolled out in upcoming phases.</p>
+              <p className="text-xs leading-relaxed text-muted-foreground">Queue changes arrive in real time over a secure connection; this page also refreshes every 15 seconds as a fallback.</p>
               <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><MapPin className="size-3.5" />{active?.doctor.room?.code ? `Room ${active.doctor.room.code}` : "Check room at reception"}</p>
             </CardContent>
           </Card>

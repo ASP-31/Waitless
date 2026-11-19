@@ -21,4 +21,8 @@ export const socketEmitter = {
     if (patientId) safeEmit(`patient:${patientId}`, "notification:new", payload);
     if (userId) safeEmit(`user:${userId}`, "notification:new", payload);
   },
+  hardwareOccupancy(doctorId: string | null | undefined, payload: unknown) {
+    safeEmit("admin:queue", "hardware:occupancy", payload);
+    if (doctorId) safeEmit(`doctor:${doctorId}`, "hardware:occupancy", payload);
+  },
 };

@@ -46,6 +46,9 @@ const envSchema = z.object({
   HOSPITAL_TIMEZONE: z.string().default("Asia/Kolkata"),
   DEFAULT_CONSULT_MINUTES: z.coerce.number().int().min(1).default(12),
   SCHEDULE_HORIZON_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+  JOBS_ENABLED: booleanish("true"),
+  SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(1000).default(15000),
+  STALE_ROOM_MINUTES: z.coerce.number().int().min(1).default(5),
 
   MQTT_URL: z.string().default("mqtt://localhost:1883"),
   MQTT_USERNAME: z.string().optional(),

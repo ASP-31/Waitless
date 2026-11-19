@@ -36,7 +36,11 @@ export function verifyHospitalQr(token: string) {
   }
   const raw = `${payload.v}.${payload.hid}.${payload.ts}`;
   const expected = sign(raw);
-  if (!crypto.timingSafeEqual(Buffer.from(payload.sig), Buffer.from(expected))) {
+  const provided = Buffer.from(payload.sig, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  // timingSafeEqual throws when lengths differ, which would surface as a 500
+  // for a truncated/tampered signature. Treat any mismatch as invalid.
+  if (provided.length !== expectedBuffer.length || !crypto.timingSafeEqual(provided, expectedBuffer)) {
     throw AppError.badRequest("QR code signature is invalid");
   }
   // optional expiry: 24h

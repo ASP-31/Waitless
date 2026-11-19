@@ -12,6 +12,7 @@ import {
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Brand } from "@/components/shared/brand";
+import { NotificationBell } from "@/components/shared/notification-bell";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/context/auth-context";
 import { useSocket } from "@/hooks/use-socket";
@@ -84,6 +85,7 @@ export function AdminLayout() {
               {user && <span className="text-sm font-medium">· {user.name}</span>}
             </div>
             <div className="flex items-center gap-2">
+              <NotificationBell />
               <Button variant="outline" size="sm" asChild>
                 <Link to="/">Patient app</Link>
               </Button>

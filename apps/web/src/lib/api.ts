@@ -133,18 +133,3 @@ export interface ReadyResponse {
   checks: { db: "up" | "down"; redis: "up" | "down" };
   timestamp: string;
 }
-
-export interface HealthResponse {
-  status: "ok";
-  service: string;
-  version: string;
-  environment: string;
-  uptimeSeconds: number;
-  timestamp: string;
-}
-
-export interface ReadyResponse {
-  status: "ready" | "degraded";
-  checks: { db: "up" | "down"; redis: "up" | "down" };
-  timestamp: string;
-}

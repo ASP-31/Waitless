@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarPlus, Check, ChevronRight, Clock3, Stethoscope, Ticket, Users } from "lucide-react";
+import { CalendarPlus, Check, ChevronRight, Clock3, Download, Stethoscope, Ticket, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -18,6 +18,37 @@ type Slot = { start: string; end: string; label: string; rangeLabel: string; isB
 type Appointment = { id: string; tokenNumber: number; serviceDay: string; slotStart: string; slotEnd: string; status: string; doctor: { fullName: string; room?: { code: string } | null; department?: { name: string } | null }; department: { name: string } };
 
 const STEPS = ["Department", "Doctor", "Time slot", "Confirm", "Booked"] as const;
+
+function icsStamp(iso: string) {
+  return `${new Date(iso).toISOString().replace(/[-:]/g, "").split(".")[0]}Z`;
+}
+
+/** Client-side ICS export: no extra endpoint or storage needed. */
+function downloadIcs(appointment: Appointment) {
+  const location = appointment.doctor.room?.code ? `Room ${appointment.doctor.room.code}` : "";
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Waitless//Appointment//EN",
+    "BEGIN:VEVENT",
+    `UID:${appointment.id}@waitless`,
+    `DTSTAMP:${icsStamp(new Date().toISOString())}`,
+    `DTSTART:${icsStamp(appointment.slotStart)}`,
+    `DTEND:${icsStamp(appointment.slotEnd)}`,
+    `SUMMARY:${appointment.doctor.fullName} — token #${appointment.tokenNumber}`,
+    `DESCRIPTION:Appointment with ${appointment.doctor.fullName} (${appointment.department?.name ?? ""}). Token #${appointment.tokenNumber}.`,
+    ...(location ? [`LOCATION:${location}`] : []),
+    "END:VEVENT",
+    "END:VCALENDAR",
+  ];
+  const blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `waitless-${appointment.serviceDay}-token-${appointment.tokenNumber}.ics`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 export function BookAppointmentPage() {
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -241,6 +272,10 @@ export function BookAppointmentPage() {
                 <p className="text-xs text-muted-foreground">{booked.department?.name ?? booked.doctor.department?.name} · {booked.serviceDay} · {new Date(booked.slotStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}{booked.doctor.room?.code ? ` · Room ${booked.doctor.room.code}` : ""}</p>
               </div>
               <div className="flex flex-wrap justify-center gap-2">
+                <Button variant="outline" className="gap-2" onClick={() => downloadIcs(booked)}>
+                  <Download className="size-4" />
+                  Add to calendar
+                </Button>
                 <Button asChild variant="outline"><Link to="/patient/appointments">View my visits</Link></Button>
                 <Button asChild><Link to="/patient/queue">Track queue</Link></Button>
               </div>

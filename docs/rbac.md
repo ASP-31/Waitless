@@ -14,6 +14,19 @@ Roles: `ADMIN`, `STAFF`, `PATIENT`, and anonymous (no token).
 | `PATCH /api/v1/patients/me` | 401 | 200 | 403 | 403 | Patient can update name/email only (no phone change) |
 | Future `:patientId` resources | 401 | 200 own / 403 others | 200 (staff ops) | 200 | Enforce via `authenticate` + role/ownership guards |
 | Future admin/hospital mgmt routes | 401 | 403 | 200/403 by matrix | 200 | Staff permissions refined per module in later phases |
+| `GET /api/v1/appointments` | 401 | 200 own | 200 | 200 | Patient results are scoped to their own rows |
+| `PATCH /api/v1/appointments/:id/cancel` | 401 | 200 own | 200 | 200 | Status must be cancellable |
+| `PATCH /api/v1/appointments/:id/reschedule` | 401 | 403 | 200 | 200 | Slot conflict checks exclude the row itself |
+| `POST /api/v1/appointments/:id/check-in` | 401 | 200 own | 200 | 200 | Patient "I'm here"; day-of only |
+| `GET /api/v1/appointments/export` | 401 | 403 | 200 | 200 | CSV export |
+| `GET /api/v1/queue/:doctorId` | 401 | 200 (masked) | 200 | 200 | Patient viewers get masked names/phones |
+| `PATCH /api/v1/queue/entries/:id/{call,start,complete,skip,arrive}` | 401 | 403 | 200 | 200 | State-machine guarded |
+| `GET/POST/PATCH /api/v1/swaps/**` | 401 | 200 own | 200 oversight | 200 | One pending swap per appointment |
+| `GET/PATCH /api/v1/notifications/**` | 401 | 200 own | 200 own | 200 own | Patient preferences are PATIENT-only |
+| `POST /api/v1/hardware/events` | 201 | 201 | 201 | 201 | Device endpoint; optional HMAC signature |
+| `GET /api/v1/hardware/events`, `/hardware/rooms` | 401 | 403 | 200 | 200 | Staff hardware panel |
+| `GET /api/v1/analytics/overview`, `/analytics/doctors` | 401 | 403 | 200 | 200 | Range defaults to today |
+| `GET /api/v1/admin/audit`, `/admin/jobs` | 401 | 403 | 200 | 200 | Read-only operational views |
 
 ## Guards (API)
 - `authenticate`: verifies bearer access token and attaches `req.auth = { userId, role, patientId? }`.

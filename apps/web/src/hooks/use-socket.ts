@@ -42,13 +42,18 @@ export function useSocket() {
     const onNotif = () => {
       void qc.invalidateQueries({ queryKey: ["notifications"] });
     };
+    const onHardware = () => {
+      void qc.invalidateQueries({ queryKey: ["hardware"] });
+    };
     s.on("queue:updated", onQueue);
     s.on("appointment:updated", onAppt);
     s.on("notification:new", onNotif);
+    s.on("hardware:occupancy", onHardware);
     return () => {
       s.off("queue:updated", onQueue);
       s.off("appointment:updated", onAppt);
       s.off("notification:new", onNotif);
+      s.off("hardware:occupancy", onHardware);
     };
   }, [qc, token, user]);
 }

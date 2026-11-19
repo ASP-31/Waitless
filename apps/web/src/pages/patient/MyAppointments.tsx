@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarX2, Ticket, X } from "lucide-react";
-import { useMemo } from "react";
+import { CalendarX2, Repeat2, Ticket, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { ApiError, api } from "@/lib/api";
@@ -9,7 +9,16 @@ import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 
 type Appointment = {
   id: string;
@@ -22,8 +31,16 @@ type Appointment = {
   cancelReason?: string | null;
 };
 
+type SwapCandidate = {
+  appointmentId: string;
+  tokenNumber: number;
+  slotStart: string;
+  patientInitials: string;
+};
+
 const UPCOMING = new Set(["BOOKED", "WAITING", "NOTIFIED", "CALLED", "IN_CONSULTATION", "DELAYED"]);
 const CANCELLED = new Set(["CANCELLED", "SKIPPED", "NO_SHOW"]);
+const SWAPPABLE = new Set(["BOOKED", "WAITING", "NOTIFIED"]);
 
 function statusVariant(status: string): "default" | "success" | "warning" | "danger" | "info" | "muted" {
   if (status === "COMPLETED") return "success";
@@ -37,8 +54,21 @@ function canCancel(status: string) {
   return ["BOOKED", "WAITING", "NOTIFIED", "DELAYED"].includes(status);
 }
 
-function AppointmentCard({ appt, onCancel, cancelling }: { appt: Appointment; onCancel: () => void; cancelling: boolean }) {
-  const time = new Date(appt.slotStart).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function timeLabel(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function AppointmentCard({
+  appt,
+  onCancel,
+  onSwap,
+  cancelling,
+}: {
+  appt: Appointment;
+  onCancel: () => void;
+  onSwap?: () => void;
+  cancelling: boolean;
+}) {
   return (
     <Card>
       <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -48,14 +78,22 @@ function AppointmentCard({ appt, onCancel, cancelling }: { appt: Appointment; on
             <Badge variant={statusVariant(appt.status)}>{appt.status.replace(/_/g, " ")}</Badge>
           </div>
           <p className="text-sm">{appt.doctor.fullName} · {appt.department?.name ?? appt.doctor.department?.name ?? "—"}</p>
-          <p className="text-xs text-muted-foreground">{appt.serviceDay} · {time}{appt.doctor.room?.code ? ` · Room ${appt.doctor.room.code}` : ""}</p>
+          <p className="text-xs text-muted-foreground">{appt.serviceDay} · {timeLabel(appt.slotStart)}{appt.doctor.room?.code ? ` · Room ${appt.doctor.room.code}` : ""}</p>
           {appt.cancelReason && <p className="text-xs text-muted-foreground">Reason: {appt.cancelReason}</p>}
         </div>
-        {canCancel(appt.status) && (
-          <Button variant="outline" size="sm" disabled={cancelling} onClick={onCancel}>
-            <X className="size-4" />Cancel
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {onSwap && (
+            <Button variant="outline" size="sm" className="gap-1.5" onClick={onSwap}>
+              <Repeat2 className="size-4" />
+              Swap slot
+            </Button>
+          )}
+          {canCancel(appt.status) && (
+            <Button variant="outline" size="sm" disabled={cancelling} onClick={onCancel}>
+              <X className="size-4" />Cancel
+            </Button>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -63,10 +101,23 @@ function AppointmentCard({ appt, onCancel, cancelling }: { appt: Appointment; on
 
 export function MyAppointmentsPage() {
   const qc = useQueryClient();
+  const [swapFor, setSwapFor] = useState<Appointment | null>(null);
+  const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
+
   const apptsQ = useQuery({
     queryKey: ["appointments", "me"],
     queryFn: async () => (await api.get<{ data: { appointments: Appointment[] } }>("/appointments?pageSize=100")).data.appointments,
   });
+
+  const eligibleQ = useQuery({
+    queryKey: ["swaps", "eligible", swapFor?.id],
+    queryFn: async () =>
+      (await api.post<{ data: { eligible: SwapCandidate[] } }>("/swaps/eligible", {
+        appointmentId: swapFor!.id,
+      })).data.eligible,
+    enabled: !!swapFor,
+  });
+
   const cancelMut = useMutation({
     mutationFn: async (id: string) => (await api.patch<{ data: { appointment: Appointment } }>(`/appointments/${id}/cancel`, {})).data.appointment,
     onSuccess: async () => {
@@ -74,6 +125,26 @@ export function MyAppointmentsPage() {
       toast.success("Appointment cancelled");
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not cancel appointment"),
+  });
+
+  const swapMut = useMutation({
+    mutationFn: async () => {
+      if (!swapFor || !selectedTarget) throw new Error("Pick a slot to swap with");
+      return api.post("/swaps", {
+        requesterAppointmentId: swapFor.id,
+        targetAppointmentId: selectedTarget,
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["appointments"] }),
+        qc.invalidateQueries({ queryKey: ["swaps"] }),
+      ]);
+      toast.success("Swap request sent. The other patient has 10 minutes to respond.");
+      setSwapFor(null);
+      setSelectedTarget(null);
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not create swap request"),
   });
 
   const groups = useMemo(() => {
@@ -84,6 +155,11 @@ export function MyAppointmentsPage() {
       cancelled: items.filter((a) => CANCELLED.has(a.status)),
     };
   }, [apptsQ.data]);
+
+  function openSwap(appt: Appointment) {
+    setSelectedTarget(null);
+    setSwapFor(appt);
+  }
 
   function renderList(list: Appointment[], emptyTitle: string, emptyDesc: string) {
     if (apptsQ.isLoading) return <p className="text-sm text-muted-foreground">Loading appointments…</p>;
@@ -100,11 +176,19 @@ export function MyAppointmentsPage() {
     return (
       <div className="space-y-3">
         {list.map((appt) => (
-          <AppointmentCard key={appt.id} appt={appt} cancelling={cancelMut.isPending} onCancel={() => cancelMut.mutate(appt.id)} />
+          <AppointmentCard
+            key={appt.id}
+            appt={appt}
+            cancelling={cancelMut.isPending}
+            onCancel={() => cancelMut.mutate(appt.id)}
+            onSwap={SWAPPABLE.has(appt.status) ? () => openSwap(appt) : undefined}
+          />
         ))}
       </div>
     );
   }
+
+  const candidates = eligibleQ.data ?? [];
 
   return (
     <div className="space-y-6">
@@ -131,6 +215,71 @@ export function MyAppointmentsPage() {
           {renderList(groups.cancelled, "Nothing cancelled", "Cancelled appointments stay visible here, with the reason if the hospital added one.")}
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={!!swapFor}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSwapFor(null);
+            setSelectedTarget(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Swap your slot</DialogTitle>
+            <DialogDescription>
+              Same doctor, same day only. Pick a patient&apos;s slot below, then send a request. They must accept
+              within 10 minutes.
+            </DialogDescription>
+          </DialogHeader>
+
+          {swapFor && (
+            <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+              <p className="font-medium">Your slot</p>
+              <p className="text-muted-foreground">
+                Token #{swapFor.tokenNumber} · {timeLabel(swapFor.slotStart)}
+              </p>
+            </div>
+          )}
+
+          <div className="max-h-64 space-y-2 overflow-y-auto">
+            {eligibleQ.isLoading && <p className="text-sm text-muted-foreground">Finding available slots…</p>}
+            {!eligibleQ.isLoading && candidates.length === 0 && (
+              <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                No other patients are eligible to swap with right now.
+              </p>
+            )}
+            {candidates.map((candidate) => (
+              <button
+                key={candidate.appointmentId}
+                type="button"
+                onClick={() => setSelectedTarget(candidate.appointmentId)}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-lg border p-3 text-left text-sm transition-colors hover:bg-accent",
+                  selectedTarget === candidate.appointmentId && "border-primary bg-primary/5",
+                )}
+              >
+                <span>
+                  <span className="font-medium">Token #{candidate.tokenNumber}</span>
+                  <span className="text-muted-foreground"> · {timeLabel(candidate.slotStart)}</span>
+                </span>
+                <span className="text-xs text-muted-foreground">{candidate.patientInitials}</span>
+              </button>
+            ))}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSwapFor(null)}>Cancel</Button>
+            <Button
+              disabled={!selectedTarget || swapMut.isPending}
+              onClick={() => swapMut.mutate()}
+            >
+              {swapMut.isPending ? "Sending…" : "Send swap request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

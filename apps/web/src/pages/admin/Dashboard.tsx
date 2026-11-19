@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, CalendarDays, CheckCircle2, ChevronRight, ListOrdered, Repeat2, Stethoscope, Users } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiStatus } from "@/components/shared/api-status";
 import { PageHeader } from "@/components/shared/page-header";
@@ -8,20 +8,36 @@ import { StatCard } from "@/components/shared/stat-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 
-const PEAK_HOURS = [22, 34, 48, 61, 74, 88, 71, 52, 39, 24];
-
 type Appointment = { status: string; slotStart: string; doctorId: string; doctor: { fullName: string } };
+type Overview = {
+  totals: { appointments: number; completed: number; cancelled: number; noShow: number; skipped: number; noShowRate: number; completionRate: number };
+  avgWaitMinutes: number;
+  avgConsultMinutes: number;
+  peakHours: Array<{ hour: number; count: number }>;
+};
 
 export function AdminDashboardPage() {
   const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const [from, setFrom] = useState(today);
+  const [to, setTo] = useState(today);
+
   const apptsQ = useQuery({
     queryKey: ["appointments", "admin", "dashboard", today],
     queryFn: async () => (await api.get<{ data: { appointments: Appointment[] } }>(`/appointments?date=${today}&pageSize=200`)).data.appointments,
     refetchInterval: 15000,
   });
+  const overviewQ = useQuery({
+    queryKey: ["analytics", "overview", from, to],
+    queryFn: async () =>
+      (await api.get<{ data: Overview }>(`/analytics/overview?from=${from}&to=${to}`)).data,
+    refetchInterval: 60_000,
+  });
+
   const items = useMemo(() => apptsQ.data ?? [], [apptsQ.data]);
+  const overview = overviewQ.data;
   const stats = useMemo(() => {
     const waiting = items.filter((a) => ["WAITING", "NOTIFIED", "DELAYED", "BOOKED"].includes(a.status)).length;
     const inConsult = items.filter((a) => a.status === "IN_CONSULTATION").length;
@@ -36,19 +52,53 @@ export function AdminDashboardPage() {
     return { waiting: waiting + called, inConsult, completed, doctors: Array.from(byDoctor.values()).sort((a, b) => b.active - a.active).slice(0, 5) };
   }, [items]);
 
+  const peakHours = overview?.peakHours ?? [];
+  const maxPeak = Math.max(1, ...peakHours.map((bucket) => bucket.count));
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Dashboard"
         description="Live view of today's clinic activity."
-        actions={<Button variant="outline" asChild><Link to="/admin/queue"><ListOrdered className="size-4" />Open queue</Link></Button>}
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              type="date"
+              value={from}
+              max={to}
+              onChange={(event) => setFrom(event.target.value)}
+              className="h-9 w-36"
+              aria-label="From date"
+            />
+            <Input
+              type="date"
+              value={to}
+              min={from}
+              onChange={(event) => setTo(event.target.value)}
+              className="h-9 w-36"
+              aria-label="To date"
+            />
+            <Button variant="outline" asChild><Link to="/admin/queue"><ListOrdered className="size-4" />Open queue</Link></Button>
+          </div>
+        }
       />
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Waiting now" value={String(stats.waiting)} hint="Active in queue flow" icon={Users} tone="info" />
         <StatCard label="In consultation" value={String(stats.inConsult)} hint="Rooms currently active" icon={Stethoscope} tone="success" />
-        <StatCard label="Today's appointments" value={String(items.length)} hint={`For ${today}`} icon={CalendarDays} tone="warning" />
-        <StatCard label="Completed today" value={String(stats.completed)} hint="Consultations closed" icon={CheckCircle2} />
+        <StatCard
+          label="Appointments in range"
+          value={String(overview?.totals.appointments ?? items.length)}
+          hint={from === to ? `For ${from}` : `${from} → ${to}`}
+          icon={CalendarDays}
+          tone="warning"
+        />
+        <StatCard
+          label="Completed in range"
+          value={String(overview?.totals.completed ?? stats.completed)}
+          hint={overview ? `${overview.totals.completionRate}% completion` : "Consultations closed"}
+          icon={CheckCircle2}
+        />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
@@ -84,16 +134,35 @@ export function AdminDashboardPage() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Today at a glance</CardTitle>
-              <CardDescription>Bookings distribution (illustrative).</CardDescription>
+              <CardTitle className="text-base">Bookings by hour</CardTitle>
+              <CardDescription>
+                {overview
+                  ? `Avg wait ${overview.avgWaitMinutes} min · Avg consult ${overview.avgConsultMinutes} min · No-show ${overview.totals.noShowRate}%`
+                  : "Distribution for the selected range."}
+              </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="flex h-28 items-end gap-1.5">
-                {PEAK_HOURS.map((height, index) => (
-                  <div key={index} className="flex-1"><div className="w-full rounded-t-sm bg-primary/25" style={{ height: `${height}%` }} title={`${9 + index}:00`} /></div>
-                ))}
-              </div>
-              <div className="mt-2 flex justify-between text-[10px] text-muted-foreground"><span>9 AM</span><span>2 PM</span><span>7 PM</span></div>
+              {peakHours.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">No bookings in this range.</p>
+              ) : (
+                <>
+                  <div className="flex h-28 items-end gap-1.5">
+                    {peakHours.map((bucket) => (
+                      <div key={bucket.hour} className="flex-1" title={`${bucket.hour}:00 · ${bucket.count} booking(s)`}>
+                        <div
+                          className="w-full rounded-t-sm bg-primary/30"
+                          style={{ height: `${Math.max(4, Math.round((bucket.count / maxPeak) * 100))}%` }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex justify-between text-[10px] text-muted-foreground">
+                    <span>{peakHours[0]?.hour ?? 0}:00</span>
+                    <span>{peakHours[Math.floor(peakHours.length / 2)]?.hour ?? 0}:00</span>
+                    <span>{peakHours[peakHours.length - 1]?.hour ?? 0}:00</span>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
 

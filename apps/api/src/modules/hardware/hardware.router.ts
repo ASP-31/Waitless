@@ -2,7 +2,7 @@ import { Router } from "express";
 import { authenticate, authorize } from "../../middleware/auth";
 import { validate } from "../../middleware/validate";
 import { hardwareEventSchema } from "./hardware.schema";
-import { ingestHardwareEvent, listRecentHardwareEvents } from "./hardware.service";
+import { ingestHardwareEvent, listHardwareRooms, listRecentHardwareEvents } from "./hardware.service";
 
 export const hardwareRouter: Router = Router();
 
@@ -20,6 +20,15 @@ hardwareRouter.get("/events", authenticate, authorize("ADMIN", "STAFF"), async (
     const room = typeof req.query.room === "string" ? req.query.room : undefined;
     const events = await listRecentHardwareEvents(room);
     res.json({ data: { events } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+hardwareRouter.get("/rooms", authenticate, authorize("ADMIN", "STAFF"), async (_req, res, next) => {
+  try {
+    const rooms = await listHardwareRooms();
+    res.json({ data: { rooms } });
   } catch (error) {
     next(error);
   }

@@ -10,11 +10,20 @@ import {
   Stethoscope,
   Ticket,
 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
+import { ApiError, api } from "@/lib/api";
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+type NotificationPreferences = {
+  pushEnabled: boolean;
+  smsEnabled: boolean;
+  emailEnabled: boolean;
+};
 
 const QUICK_ACTIONS = [
   {
@@ -44,6 +53,25 @@ const QUICK_ACTIONS = [
 ];
 
 export function PatientHomePage() {
+  const qc = useQueryClient();
+  const prefsQ = useQuery({
+    queryKey: ["notifications", "preferences"],
+    queryFn: async () =>
+      (await api.get<{ data: { preferences: NotificationPreferences } }>("/notifications/preferences")).data.preferences,
+  });
+
+  const updatePrefs = useMutation({
+    mutationFn: async (patch: Partial<NotificationPreferences>) =>
+      (await api.patch<{ data: { preferences: NotificationPreferences } }>("/notifications/preferences", patch)).data.preferences,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["notifications", "preferences"] });
+      toast.success("Notification preferences saved");
+    },
+    onError: (error) => toast.error(error instanceof ApiError ? error.message : "Could not save preferences"),
+  });
+
+  const prefs = prefsQ.data;
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -144,6 +172,35 @@ export function PatientHomePage() {
           ))}
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base"><BellRing className="size-4 text-primary" />Notifications</CardTitle>
+          <CardDescription>In-app alerts are always on. Choose any extra channels you want.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {([
+            ["pushEnabled", "Browser push", "Turn alerts when your token is close."],
+            ["smsEnabled", "SMS", "Text message reminders (provider pending)."],
+            ["emailEnabled", "Email", "Booking and cancellation receipts."],
+          ] as const).map(([key, label, hint]) => (
+            <div key={key} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2">
+              <div>
+                <p className="font-medium">{label}</p>
+                <p className="text-xs text-muted-foreground">{hint}</p>
+              </div>
+              <Button
+                size="sm"
+                variant={prefs?.[key] ? "default" : "outline"}
+                disabled={prefsQ.isLoading || updatePrefs.isPending}
+                onClick={() => updatePrefs.mutate({ [key]: !prefs?.[key] })}
+              >
+                {prefs?.[key] ? "On" : "Off"}
+              </Button>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
     </div>
   );
 }

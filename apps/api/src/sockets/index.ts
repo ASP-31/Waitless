@@ -17,7 +17,7 @@ export function initSockets(httpServer: HttpServer): Server {
 
   io.use((socket, next) => {
     const token = (socket.handshake.auth as { token?: string } | undefined)?.token;
-    if (!token) return next();
+    if (!token) return next(new Error("UNAUTHORIZED"));
     try {
       const payload = verifyAccessToken(token);
       (socket.data as { auth?: unknown }).auth = payload;

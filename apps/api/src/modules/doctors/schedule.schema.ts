@@ -3,17 +3,21 @@ import { z } from "zod";
 const minutesSchema = z.coerce.number().int().min(0).max(1439);
 const slotMinutesSchema = z.coerce.number().int().min(5).max(240);
 
-export const scheduleCreateSchema = z
-  .object({
-    dayOfWeek: z.coerce.number().int().min(0).max(6),
-    startMinute: minutesSchema,
-    endMinute: minutesSchema,
-    slotMinutes: slotMinutesSchema.default(15),
-    isActive: z.boolean().optional(),
-  })
+const scheduleFieldsSchema = z.object({
+  dayOfWeek: z.coerce.number().int().min(0).max(6),
+  startMinute: minutesSchema,
+  endMinute: minutesSchema,
+  slotMinutes: slotMinutesSchema.default(15),
+  isActive: z.boolean().optional(),
+});
+
+export const scheduleCreateSchema = scheduleFieldsSchema
   .refine((v) => v.endMinute > v.startMinute, { message: "endMinute must be after startMinute", path: ["endMinute"] });
 
-export const scheduleUpdateSchema = scheduleCreateSchema.partial();
+export const scheduleUpdateSchema = scheduleFieldsSchema.partial().refine(
+  (v) => v.startMinute === undefined || v.endMinute === undefined || v.endMinute > v.startMinute,
+  { message: "endMinute must be after startMinute", path: ["endMinute"] },
+);
 
 export const exceptionUpsertSchema = z
   .object({

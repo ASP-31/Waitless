@@ -1,12 +1,19 @@
 import { Prisma, type AppointmentStatus } from "@prisma/client";
-import { canCancel, toDayKey, zonedDateTimeToUtc } from "@waitless/shared";
+import { ERROR_CODES, addDaysToDayKey, canCancel, toDayKey, zonedDateTimeToUtc } from "@waitless/shared";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { socketEmitter } from "../../sockets/emitter";
 import { AppError } from "../../utils/errors";
 import { normalizePhone, safeName } from "../../utils/phone";
+import { notify } from "../notifications/notification.service";
+import { ensureDayQueue, markArrived, recomputePositions } from "../queue/queue.service";
 
 const ACTIVE_STATUSES = ["BOOKED", "WAITING", "NOTIFIED", "CALLED", "IN_CONSULTATION", "DELAYED"] as const;
+const CHECK_IN_STATUSES = ["BOOKED", "WAITING", "NOTIFIED", "CALLED", "DELAYED", "SKIPPED"] as const;
+
+function todayKey() {
+  return toDayKey(new Date(), env.HOSPITAL_TIMEZONE);
+}
 
 type AuthCtx = { userId: string; role: "ADMIN" | "STAFF" | "PATIENT"; patientId?: string | null };
 
@@ -16,10 +23,26 @@ async function getPatientByUser(userId: string) {
   return patient;
 }
 
-async function ensureSlotBookable(tx: Prisma.TransactionClient, doctorId: string, slotStart: Date, serviceDay: string) {
+async function ensureSlotBookable(
+  tx: Prisma.TransactionClient,
+  doctorId: string,
+  slotStart: Date,
+  serviceDay: string,
+  excludeAppointmentId?: string,
+) {
   const doctor = await tx.doctor.findUnique({ where: { id: doctorId }, include: { department: true } });
   if (!doctor) throw AppError.notFound("Doctor not found");
   if (!doctor.isActive) throw AppError.conflict("CONFLICT", "Doctor is not active");
+  if (!doctor.department.isActive) throw AppError.conflict("CONFLICT", "Department is not active");
+
+  const horizon = addDaysToDayKey(todayKey(), env.SCHEDULE_HORIZON_DAYS);
+  if (serviceDay < todayKey()) throw new AppError(ERROR_CODES.SLOT_PAST, "Cannot book a slot in the past");
+  if (serviceDay > horizon) {
+    throw new AppError(
+      ERROR_CODES.BOOKING_HORIZON_EXCEEDED,
+      `Appointments can only be booked ${env.SCHEDULE_HORIZON_DAYS} days ahead`,
+    );
+  }
 
   // Validate slot exists in availability for that day (simple check against schedules/exceptions via same logic as availability)
   const day = serviceDay;
@@ -52,7 +75,12 @@ async function ensureSlotBookable(tx: Prisma.TransactionClient, doctorId: string
   const slotEnd = zonedDateTimeToUtc(day, slotMinute + matchWindow.slotMinutes, env.HOSPITAL_TIMEZONE);
 
   const conflict = await tx.appointment.findFirst({
-    where: { doctorId, slotStart, status: { in: [...ACTIVE_STATUSES] } },
+    where: {
+      doctorId,
+      slotStart,
+      status: { in: [...ACTIVE_STATUSES] },
+      ...(excludeAppointmentId ? { id: { not: excludeAppointmentId } } : {}),
+    },
     select: { id: true },
   });
   if (conflict) throw AppError.conflict("SLOT_TAKEN", "That time slot is no longer available");
@@ -80,7 +108,7 @@ export async function createAppointment(auth: AuthCtx, input: { doctorId: string
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await prisma.$transaction(async (tx) => {
+      const appointment = await prisma.$transaction(async (tx) => {
         const { doctor, slotEnd, departmentId } = await ensureSlotBookable(tx, input.doctorId, slotStart, serviceDay);
         const tokenNumber = await allocateToken(tx, doctor.id, serviceDay);
         const appointment = await tx.appointment.create({
@@ -103,25 +131,22 @@ export async function createAppointment(auth: AuthCtx, input: { doctorId: string
             department: true,
           },
         });
-        // basic in-app notification record (Phase 7 will make this robust/scheduled)
-        await tx.notification.create({
-          data: {
-            patientId: appointment.patientId,
-            userId: auth.userId,
-            appointmentId: appointment.id,
-            type: "BOOKING_CONFIRMED",
-            channel: "IN_APP",
-            title: "Appointment booked",
-            body: `Your appointment with ${doctor.fullName} is confirmed for ${serviceDay} (token #${tokenNumber}).`,
-            status: "SENT",
-            sentAt: new Date(),
-            dedupeKey: `booking:${appointment.id}`,
-          },
-        }).catch(() => {});
-        socketEmitter.queueUpdated(appointment.doctorId, { doctorId: appointment.doctorId, serviceDay });
-        socketEmitter.appointmentUpdated(appointment.patientId, { appointmentId: appointment.id, status: appointment.status });
         return appointment;
       });
+
+      await notify({
+        patientId: appointment.patientId,
+        userId: auth.userId,
+        appointmentId: appointment.id,
+        type: "BOOKING_CONFIRMED",
+        title: "Appointment booked",
+        body: `Your appointment with ${appointment.doctor.fullName} is confirmed for ${serviceDay} (token #${appointment.tokenNumber}).`,
+        data: { appointmentId: appointment.id, tokenNumber: appointment.tokenNumber, serviceDay },
+        dedupeKey: `booking:${appointment.id}`,
+      }).catch(() => undefined);
+      socketEmitter.queueUpdated(appointment.doctorId, { doctorId: appointment.doctorId, serviceDay });
+      socketEmitter.appointmentUpdated(appointment.patientId, { appointmentId: appointment.id, status: appointment.status });
+      return appointment;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002" && attempt < 2) {
         continue;
@@ -142,7 +167,7 @@ export async function createWalkIn(auth: AuthCtx, input: { doctorId: string; slo
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await prisma.$transaction(async (tx) => {
+      const appointment = await prisma.$transaction(async (tx) => {
         let patient = await tx.patient.findUnique({ where: { phone } });
         if (!patient) {
           const user = await tx.user.create({ data: { role: "PATIENT", name: fullName, phone } });
@@ -155,7 +180,7 @@ export async function createWalkIn(auth: AuthCtx, input: { doctorId: string; slo
 
         const { doctor, slotEnd, departmentId } = await ensureSlotBookable(tx, input.doctorId, slotStart, serviceDay);
         const tokenNumber = await allocateToken(tx, doctor.id, serviceDay);
-        const appointment = await tx.appointment.create({
+        const created = await tx.appointment.create({
           data: {
             patientId: patient.id,
             doctorId: doctor.id,
@@ -180,12 +205,26 @@ export async function createWalkIn(auth: AuthCtx, input: { doctorId: string; slo
             actorUserId: auth.userId,
             action: "APPOINTMENT_CREATED",
             entity: "Appointment",
-            entityId: appointment.id,
+            entityId: created.id,
             after: { source: "WALK_IN", tokenNumber, serviceDay } as unknown as Prisma.InputJsonValue,
           },
         });
-        return appointment;
+        return created;
       });
+
+      await notify({
+        patientId: appointment.patientId,
+        userId: appointment.patient.userId,
+        appointmentId: appointment.id,
+        type: "BOOKING_CONFIRMED",
+        title: "Appointment booked at the desk",
+        body: `Your appointment with ${appointment.doctor.fullName} is confirmed for ${serviceDay} (token #${appointment.tokenNumber}).`,
+        data: { appointmentId: appointment.id, tokenNumber: appointment.tokenNumber, serviceDay, source: "WALK_IN" },
+        dedupeKey: `booking:${appointment.id}`,
+      }).catch(() => undefined);
+      socketEmitter.queueUpdated(appointment.doctorId, { doctorId: appointment.doctorId, serviceDay });
+      socketEmitter.appointmentUpdated(appointment.patientId, { appointmentId: appointment.id, status: appointment.status });
+      return appointment;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002" && attempt < 2) continue;
       throw err;
@@ -254,8 +293,10 @@ export async function cancelAppointment(auth: AuthCtx, id: string, reason?: stri
       include: { doctor: { include: { department: true, room: true } }, department: true, patient: true, queueEntry: true },
     });
     if (next.queueEntry) {
-      await tx.queueEntry.delete({ where: { id: next.queueEntry.id } }).catch(() => {});
+      await tx.queueEntry.delete({ where: { id: next.queueEntry.id } });
     }
+    // Freeing a slot shifts everyone behind it, so positions/ETAs are stale.
+    await recomputePositions(tx, appt.doctorId, appt.serviceDay);
     await tx.auditLog.create({
       data: {
         actorUserId: auth.userId,
@@ -268,6 +309,18 @@ export async function cancelAppointment(auth: AuthCtx, id: string, reason?: stri
     });
     return next;
   });
+
+  await notify({
+    patientId: updated.patientId,
+    appointmentId: updated.id,
+    type: "APPOINTMENT_CANCELLED",
+    title: "Appointment cancelled",
+    body: `Your appointment with ${updated.doctor.fullName} on ${updated.serviceDay} has been cancelled.`,
+    data: { appointmentId: updated.id, reason: reason ?? null },
+    dedupeKey: `cancelled:${updated.id}`,
+  }).catch(() => undefined);
+  socketEmitter.queueUpdated(updated.doctorId, { doctorId: updated.doctorId, serviceDay: updated.serviceDay });
+  socketEmitter.appointmentUpdated(updated.patientId, { appointmentId: updated.id, status: "CANCELLED" });
   return updated;
 }
 
@@ -281,24 +334,184 @@ export async function rescheduleAppointment(auth: AuthCtx, id: string, slotStart
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await prisma.$transaction(async (tx) => {
-        const { slotEnd, departmentId } = await ensureSlotBookable(tx, appt.doctorId, slotStart, serviceDay);
-        // new token for new day/slot context
+      const updated = await prisma.$transaction(async (tx) => {
+        // The appointment's own row must be excluded, otherwise moving to a
+        // later slot on the same day would collide with itself.
+        const { slotEnd, departmentId } = await ensureSlotBookable(
+          tx,
+          appt.doctorId,
+          slotStart,
+          serviceDay,
+          id,
+        );
         const tokenNumber = await allocateToken(tx, appt.doctorId, serviceDay);
-        const updated = await tx.appointment.update({
+        // Moving a NOTIFIED/DELAYED appointment to a new slot/day must clear the
+        // old turn state, otherwise the entry stays "called" in the new queue.
+        const nextStatus: AppointmentStatus = serviceDay === todayKey() ? "WAITING" : "BOOKED";
+        const next = await tx.appointment.update({
           where: { id },
-          data: { slotStart, slotEnd, serviceDay, tokenNumber, departmentId, notes: reason ? `${appt.notes ? appt.notes + "\n" : ""}Rescheduled: ${reason}` : appt.notes },
+          data: {
+            slotStart,
+            slotEnd,
+            serviceDay,
+            tokenNumber,
+            departmentId,
+            status: nextStatus,
+            notes: reason ? `${appt.notes ? appt.notes + "\n" : ""}Rescheduled: ${reason}` : appt.notes,
+          },
           include: { doctor: { include: { department: true, room: true } }, department: true, patient: true, queueEntry: true },
         });
+        if (next.queueEntry) {
+          await tx.queueEntry.update({
+            where: { id: next.queueEntry.id },
+            data: {
+              serviceDay,
+              status: nextStatus,
+              notifiedAt: null,
+              calledAt: null,
+              graceDeadlineAt: null,
+              skippedReason: null,
+            },
+          });
+        }
+        await recomputePositions(tx, appt.doctorId, appt.serviceDay);
+        if (serviceDay !== appt.serviceDay) {
+          await recomputePositions(tx, appt.doctorId, serviceDay);
+        }
         await tx.auditLog.create({
-          data: { actorUserId: auth.userId, action: "APPOINTMENT_RESCHEDULED", entity: "Appointment", entityId: id, before: { slotStart: appt.slotStart.toISOString(), serviceDay: appt.serviceDay } as Prisma.InputJsonValue, after: { slotStart: slotStart.toISOString(), serviceDay } as Prisma.InputJsonValue },
+          data: {
+            actorUserId: auth.userId,
+            action: "APPOINTMENT_RESCHEDULED",
+            entity: "Appointment",
+            entityId: id,
+            before: { slotStart: appt.slotStart.toISOString(), serviceDay: appt.serviceDay } as Prisma.InputJsonValue,
+            after: { slotStart: slotStart.toISOString(), serviceDay } as Prisma.InputJsonValue,
+          },
         });
-        return updated;
+        return next;
       });
+
+      await notify({
+        patientId: updated.patientId,
+        appointmentId: updated.id,
+        type: "BOOKING_CONFIRMED",
+        title: "Appointment rescheduled",
+        body: `Your appointment with ${updated.doctor.fullName} moved to ${serviceDay} (token #${updated.tokenNumber}).`,
+        data: { appointmentId: updated.id, tokenNumber: updated.tokenNumber, serviceDay },
+        dedupeKey: `rescheduled:${updated.id}:${slotStart.toISOString()}`,
+      }).catch(() => undefined);
+      socketEmitter.queueUpdated(updated.doctorId, { doctorId: updated.doctorId, serviceDay });
+      if (serviceDay !== appt.serviceDay) {
+        socketEmitter.queueUpdated(appt.doctorId, { doctorId: appt.doctorId, serviceDay: appt.serviceDay });
+      }
+      socketEmitter.appointmentUpdated(updated.patientId, { appointmentId: updated.id, status: updated.status });
+      return updated;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002" && attempt < 2) continue;
       throw err;
     }
   }
   throw AppError.conflict("CONFLICT", "Could not reschedule appointment");
+}
+
+/**
+ * Patient self check-in ("I'm here"). Staff may check in any appointment.
+ * Delegates to the queue state machine so requeue-after-skip and call-again
+ * behave exactly like the desk actions.
+ */
+export async function checkInAppointment(auth: AuthCtx, id: string) {
+  const appt = await getAppointmentById(auth, id);
+  if (appt.serviceDay !== todayKey()) {
+    throw new AppError(ERROR_CODES.NOT_IN_QUEUE, "You can only check in on the day of your appointment");
+  }
+  if (!(CHECK_IN_STATUSES as readonly string[]).includes(appt.status)) {
+    throw AppError.conflict("INVALID_TRANSITION", "This appointment cannot be checked in");
+  }
+
+  await ensureDayQueue(appt.doctorId, appt.serviceDay);
+  const entry = await prisma.queueEntry.findUnique({ where: { appointmentId: appt.id } });
+  if (!entry) throw AppError.notFound("Queue entry not found for this appointment");
+
+  const updated = await markArrived(entry.id, auth.userId);
+  const checkedInAt = appt.checkedInAt ?? new Date();
+  await prisma.appointment.update({ where: { id: appt.id }, data: { checkedInAt } });
+  if (!appt.checkedInAt) {
+    await prisma.auditLog.create({
+      data: {
+        actorUserId: auth.userId,
+        action: "APPOINTMENT_CHECKED_IN",
+        entity: "Appointment",
+        entityId: appt.id,
+        after: { checkedInAt: checkedInAt.toISOString(), source: "PATIENT" } as Prisma.InputJsonValue,
+      },
+    });
+  }
+  return updated;
+}
+
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export async function exportAppointmentsCsv(
+  auth: AuthCtx,
+  query: { date?: string; doctorId?: string; status?: string; q?: string },
+): Promise<string> {
+  if (auth.role !== "ADMIN" && auth.role !== "STAFF") {
+    throw AppError.forbidden("Only staff can export appointments");
+  }
+  const where: Prisma.AppointmentWhereInput = {};
+  if (query.date) where.serviceDay = query.date;
+  if (query.doctorId) where.doctorId = query.doctorId;
+  if (query.status) where.status = query.status as AppointmentStatus;
+  if (query.q) {
+    where.OR = [
+      { patient: { fullName: { contains: query.q, mode: "insensitive" } } },
+      { patient: { phone: { contains: query.q } } },
+      { doctor: { fullName: { contains: query.q, mode: "insensitive" } } },
+    ];
+  }
+
+  const rows = await prisma.appointment.findMany({
+    where,
+    include: { patient: true, doctor: { include: { department: true } } },
+    orderBy: [{ serviceDay: "asc" }, { slotStart: "asc" }],
+  });
+
+  const header = [
+    "appointmentId",
+    "serviceDay",
+    "slotStart",
+    "tokenNumber",
+    "status",
+    "patientName",
+    "patientPhone",
+    "doctorName",
+    "department",
+    "source",
+    "createdAt",
+  ];
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(
+      [
+        row.id,
+        row.serviceDay,
+        row.slotStart.toISOString(),
+        row.tokenNumber,
+        row.status,
+        row.patient.fullName,
+        row.patient.phone,
+        row.doctor.fullName,
+        row.doctor.department?.name ?? "",
+        row.source,
+        row.createdAt.toISOString(),
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+  }
+  return `${lines.join("\r\n")}\r\n`;
 }
