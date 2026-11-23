@@ -22,16 +22,21 @@ const ALLOWED: Array<[string, string]> = [
   ["NOTIFIED", "DELAYED"],
   ["NOTIFIED", "SKIPPED"],
   ["NOTIFIED", "CANCELLED"],
+  ["NOTIFIED", "NO_SHOW"],
   ["CALLED", "IN_CONSULTATION"],
   ["CALLED", "DELAYED"],
   ["CALLED", "SKIPPED"],
   ["CALLED", "WAITING"],
+  ["CALLED", "NO_SHOW"],
   ["DELAYED", "CALLED"],
   ["DELAYED", "WAITING"],
   ["DELAYED", "SKIPPED"],
   ["DELAYED", "CANCELLED"],
+  ["DELAYED", "NO_SHOW"],
   ["IN_CONSULTATION", "COMPLETED"],
   ["SKIPPED", "CALLED"],
+  ["SKIPPED", "WAITING"],
+  ["SKIPPED", "NO_SHOW"],
 ];
 
 describe("appointment state machine", () => {

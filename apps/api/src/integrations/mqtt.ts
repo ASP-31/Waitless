@@ -1,11 +1,15 @@
 import mqtt, { type MqttClient } from "mqtt";
 import { env } from "../config/env";
 import { logger } from "../config/logger";
+import { hardwareEventSchema } from "../modules/hardware/hardware.schema";
 import { ingestHardwareEvent } from "../modules/hardware/hardware.service";
+import { AppError } from "../utils/errors";
 
 let client: MqttClient | null = null;
 
-export function startMqttIntegration() {
+const TOPICS = ["waitless/rooms/+/occupancy", "waitless/rooms/+/heartbeat"] as const;
+
+export function startMqttIntegration(): void {
   if (!env.HARDWARE_ENABLED && env.NODE_ENV === "production") return;
   if (client) return;
   try {
@@ -16,20 +20,44 @@ export function startMqttIntegration() {
     });
     client.on("connect", () => {
       logger.info({ url: env.MQTT_URL }, "mqtt connected");
-      client?.subscribe("waitless/rooms/+/occupancy");
-      client?.subscribe("waitless/rooms/+/heartbeat");
+      client?.subscribe([...TOPICS]);
     });
     client.on("message", (topic, payload) => {
       void (async () => {
         try {
           const parts = topic.split("/");
-          const roomId = parts[2];
-          if (!roomId) return;
-          const data = JSON.parse(payload.toString("utf8")) as Record<string, unknown>;
-          const type = topic.endsWith("/heartbeat") ? "HEARTBEAT" : (String(data.type ?? "OCCUPIED").toUpperCase() as "OCCUPIED" | "VACANT" | "HEARTBEAT");
-          await ingestHardwareEvent({ roomId, type, ts: data.ts as string | number | undefined, seq: data.seq as string | number | undefined, payload: data });
-        } catch (err) {
-          logger.warn({ err, topic }, "failed to process mqtt message");
+          const topicRoom = parts[2];
+          if (!topicRoom) return;
+
+          const raw = JSON.parse(payload.toString("utf8")) as Record<string, unknown>;
+          const roomId = typeof raw.roomId === "string" && raw.roomId ? raw.roomId : topicRoom;
+          if (roomId !== topicRoom) {
+            logger.warn({ topic, payloadRoomId: roomId }, "mqtt room mismatch, ignoring message");
+            return;
+          }
+
+          const type = topic.endsWith("/heartbeat") ? "HEARTBEAT" : raw.type;
+          const parsed = hardwareEventSchema.safeParse({
+            v: raw.v,
+            roomId,
+            type,
+            ts: raw.ts,
+            seq: raw.seq,
+            sig: raw.sig,
+            payload: raw,
+          });
+          if (!parsed.success) {
+            logger.warn({ topic, issues: parsed.error.issues }, "malformed mqtt event, ignoring");
+            return;
+          }
+          // Signature verification, dedupe and lastSeenAt updates all live in ingest.
+          await ingestHardwareEvent(parsed.data);
+        } catch (error) {
+          if (error instanceof AppError && error.status === 401) {
+            logger.warn({ topic, reason: error.message }, "ignoring unsigned mqtt event");
+            return;
+          }
+          logger.warn({ err: error, topic }, "failed to process mqtt message");
         }
       })();
     });
@@ -39,7 +67,7 @@ export function startMqttIntegration() {
   }
 }
 
-export async function stopMqttIntegration() {
+export async function stopMqttIntegration(): Promise<void> {
   if (!client) return;
   await new Promise<void>((resolve) => client?.end(false, {}, () => resolve()));
   client = null;

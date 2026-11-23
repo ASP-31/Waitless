@@ -23,6 +23,15 @@ if (!command) {
   process.exit(1);
 }
 
+// Tests always run in test mode. DB-backed suites use the disposable test
+// database when one is configured so a local `pnpm test` cannot wipe dev data.
+if (command.includes("vitest")) {
+  process.env.NODE_ENV = "test";
+  if (process.env.RUN_DB_TESTS === "true" && process.env.TEST_DATABASE_URL) {
+    process.env.DATABASE_URL = process.env.TEST_DATABASE_URL;
+  }
+}
+
 const result = spawnSync(command, args, {
   stdio: "inherit",
   env: process.env,

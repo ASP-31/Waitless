@@ -4,6 +4,8 @@ import { env } from "./config/env";
 import { logger } from "./config/logger";
 import { prisma } from "./config/prisma";
 import { redis } from "./config/redis";
+import { closeQueues } from "./jobs/schedulers";
+import { startWorkers, stopWorkers } from "./jobs/workers";
 import { startMqttIntegration, stopMqttIntegration } from "./integrations/mqtt";
 import { initSockets, shutdownSockets } from "./sockets";
 
@@ -12,6 +14,11 @@ const httpServer = createServer(app);
 
 initSockets(httpServer);
 startMqttIntegration();
+// Workers are lifecycle-critical but not startup-critical: Redis outages are
+// logged and retried by BullMQ without preventing the API from serving health.
+void startWorkers().catch((error: unknown) => {
+  logger.error({ err: error }, "failed to start background workers");
+});
 
 httpServer.listen(env.PORT, () => {
   logger.info(`Waitless API listening on http://localhost:${env.PORT}/api/v1`);
@@ -36,6 +43,8 @@ async function shutdown(signal: string): Promise<void> {
   try {
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     await shutdownSockets();
+    await stopWorkers().catch((error: unknown) => logger.error({ err: error }, "worker shutdown failed"));
+    await closeQueues().catch((error: unknown) => logger.error({ err: error }, "queue shutdown failed"));
     await stopMqttIntegration();
     await prisma.$disconnect();
     redis.disconnect();

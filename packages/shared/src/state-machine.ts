@@ -13,12 +13,13 @@ import type { AppointmentStatus } from "./enums";
 export const APPOINTMENT_TRANSITIONS: Record<AppointmentStatus, readonly AppointmentStatus[]> = {
   BOOKED: ["WAITING", "CANCELLED", "NO_SHOW"],
   WAITING: ["NOTIFIED", "CALLED", "DELAYED", "CANCELLED", "NO_SHOW"],
-  NOTIFIED: ["CALLED", "DELAYED", "SKIPPED", "CANCELLED"],
-  CALLED: ["IN_CONSULTATION", "DELAYED", "SKIPPED", "WAITING"],
-  DELAYED: ["CALLED", "WAITING", "SKIPPED", "CANCELLED"],
+  NOTIFIED: ["CALLED", "DELAYED", "SKIPPED", "CANCELLED", "NO_SHOW"],
+  CALLED: ["IN_CONSULTATION", "DELAYED", "SKIPPED", "WAITING", "NO_SHOW"],
+  DELAYED: ["CALLED", "WAITING", "SKIPPED", "CANCELLED", "NO_SHOW"],
   IN_CONSULTATION: ["COMPLETED"],
   COMPLETED: [],
-  SKIPPED: ["CALLED"],
+  /** SKIP_POLICY=end requeues the entry to the tail of the waiting list. */
+  SKIPPED: ["CALLED", "WAITING", "NO_SHOW"],
   CANCELLED: [],
   NO_SHOW: [],
 };

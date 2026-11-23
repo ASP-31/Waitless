@@ -65,16 +65,41 @@ erDiagram
 | One appointment per doctor per slot | `@@unique([doctorId, slotStart])` |
 | Token number unique per doctor per day | `@@unique([doctorId, serviceDay, tokenNumber])` |
 | One queue entry per appointment | `QueueEntry.appointmentId @unique` |
+| One room per doctor | `Doctor.roomId @unique` |
 | One pending swap per appointment (either role) | partial unique indexes in `20261113062500_swap_pending_unique` |
 | Hardware replays ignored | `HardwareEvent.dedupeKey @unique` |
 | Notification sends idempotent | `Notification.dedupeKey @unique` |
+| Refresh tokens stored only as hashes | `RefreshToken.tokenHash @unique`; rotation revokes the old row |
 | Contiguous queue positions | Queue service (cannot be expressed without deferrable constraints) |
+| Room `ONLINE`/`DEGRADED` health | App-managed string column updated by the device watchdog/heartbeats |
+
+## Phase 10 additions
+
+Migration `20261119000000_phase10_completion` adds the columns used by the
+latest queue, hardware, and push flows:
+
+| Table | Column | Purpose |
+|---|---|---|
+| `QueueEntry` | `selfCheckInAt` | One patient "I'm here" action per visit |
+| `Consultation` | `suggestedEndAt` | Sensor-suggested end time; staff still confirms completion |
+| `NotificationPreference` | `pushSubscriptions` (`JSONB`) | Web Push subscription endpoints and keys |
+| `Room` | `status` (text, default `ONLINE`) | Device health; `DEGRADED` after watchdog timeout |
+| `Room` | `lastEventAt` | Last occupancy event for the room |
+
+`Consultation.endSource` records who ended a visit: `STAFF`, `SENSOR`,
+`TIMEOUT`, or `SYSTEM`. `HardwareEvent.result` captures what the gateway did
+(`RECORDED`, `ASSOCIATED`, `UNSCHEDULED_OCCUPANCY`, `SUGGESTED_END`,
+`DEBOUNCED`, `AUTO_COMPLETED`).
 
 ## Seeding
 
-`pnpm db:seed` is idempotent for structural rows (departments, doctors, rooms,
-schedules, staff, patients). Demo-day appointments are tagged `[seed]` and
-recreated on each run, so repeated seeding never accumulates duplicates.
+`pnpm db:seed` (and the documented `pnpm db:seed:demo` alias with `--demo`) is
+idempotent for structural rows (departments, doctors, rooms, schedules, staff,
+patients). Demo-day appointments are tagged `[seed]` and recreated on each run,
+so repeated seeding never accumulates duplicates.
 
-The seed picks the next non-Sunday day in `HOSPITAL_TIMEZONE` as the demo day and
-prints the credentials for both staff accounts.
+The seed picks the next non-Sunday day in `HOSPITAL_TIMEZONE` as the demo day,
+prints that day plus both staff logins, and recreates the mid-flow clinic and
+past-visit history tagged `[seed]`. If the chosen day is not today, pass
+`?date=<printed day>` to the queue API. See `docs/demo.md` for the patient
+credentials and a guided walkthrough.

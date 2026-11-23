@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { hash, verify } from "@node-rs/argon2";
 import type { Role, User } from "@prisma/client";
 import type { Request, Response } from "express";
 import { env, isProd } from "../../config/env";
+import { logger } from "../../config/logger";
 import { prisma } from "../../config/prisma";
+import { redis } from "../../config/redis";
 import { AppError } from "../../utils/errors";
 import {
   hashToken,
@@ -15,6 +18,49 @@ import {
 import { ERROR_CODES } from "@waitless/shared";
 
 const REFRESH_COOKIE = "waitless_refresh";
+const LOGIN_FAILURE_LIMIT = 5;
+const LOGIN_LOCK_SECONDS = 15 * 60;
+
+/** Hashed so raw email/phone identifiers are never written into Redis keys. */
+function loginKey(prefix: string, identifier: string): string {
+  return `waitless:${prefix}:${createHash("sha256").update(identifier.toLowerCase().trim()).digest("hex")}`;
+}
+
+async function assertNotLocked(identifier: string): Promise<void> {
+  if (env.NODE_ENV === "test") return;
+  try {
+    const locked = await redis.get(loginKey("login-lock", identifier));
+    if (locked) {
+      throw new AppError(ERROR_CODES.RATE_LIMITED, "This account is temporarily locked. Try again in 15 minutes.");
+    }
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    logger.warn({ err: error }, "login lockout check unavailable");
+  }
+}
+
+async function recordFailedLogin(identifier: string): Promise<void> {
+  if (env.NODE_ENV === "test") return;
+  try {
+    const failures = await redis.incr(loginKey("login-fail", identifier));
+    if (failures === 1) await redis.expire(loginKey("login-fail", identifier), LOGIN_LOCK_SECONDS);
+    if (failures >= LOGIN_FAILURE_LIMIT) {
+      await redis.set(loginKey("login-lock", identifier), "1", "EX", LOGIN_LOCK_SECONDS);
+      await redis.del(loginKey("login-fail", identifier));
+    }
+  } catch (error) {
+    logger.warn({ err: error }, "login failure counter unavailable");
+  }
+}
+
+async function clearFailedLogins(identifier: string): Promise<void> {
+  if (env.NODE_ENV === "test") return;
+  try {
+    await redis.del(loginKey("login-fail", identifier), loginKey("login-lock", identifier));
+  } catch (error) {
+    logger.warn({ err: error }, "login failure cleanup unavailable");
+  }
+}
 
 export function setRefreshCookie(res: Response, token: string) {
   res.cookie(REFRESH_COOKIE, token, {
@@ -79,6 +125,8 @@ export async function issueSession(
 
 export async function loginWithPassword(identifier: string, password: string, req: Request, res: Response) {
   const id = identifier.trim().toLowerCase();
+  await assertNotLocked(id);
+
   const user = await prisma.user.findFirst({
     where: {
       OR: [{ email: id }, { email: identifier.trim() }, { phone: identifier.trim() }],
@@ -88,6 +136,7 @@ export async function loginWithPassword(identifier: string, password: string, re
   });
 
   if (!user || !user.passwordHash || !isStaffRole(user.role)) {
+    await recordFailedLogin(id);
     throw new AppError(ERROR_CODES.INVALID_CREDENTIALS, "Invalid email/phone or password");
   }
   if (!user.isActive) {
@@ -96,9 +145,11 @@ export async function loginWithPassword(identifier: string, password: string, re
 
   const ok = await verify(user.passwordHash, password);
   if (!ok) {
+    await recordFailedLogin(id);
     throw new AppError(ERROR_CODES.INVALID_CREDENTIALS, "Invalid email/phone or password");
   }
 
+  await clearFailedLogins(id);
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
   const session = await issueSession({ id: user.id, role: user.role }, req, res);
 

@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { adminRouter } from "./modules/admin/admin.router";
+import { analyticsRouter } from "./modules/analytics/analytics.router";
 import { appointmentRouter } from "./modules/appointments/appointment.router";
 import { authRouter } from "./modules/auth/auth.router";
 import { departmentRouter } from "./modules/departments/department.router";
@@ -24,6 +26,5 @@ apiRouter.use("/qr", qrRouter);
 apiRouter.use("/swaps", swapRouter);
 apiRouter.use("/notifications", notificationRouter);
 apiRouter.use("/hardware", hardwareRouter);
-
-// Feature routers are mounted here as each phase lands:
-// apiRouter.use("/admin", adminRouter);
+apiRouter.use("/analytics", analyticsRouter);
+apiRouter.use("/admin", adminRouter);

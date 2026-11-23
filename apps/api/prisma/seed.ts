@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { hash } from "@node-rs/argon2";
-import { PrismaClient, type AppointmentStatus } from "@prisma/client";
+import { PrismaClient, type AppointmentStatus, type Prisma } from "@prisma/client";
 import {
   addDaysToDayKey,
   dayOfWeek,
@@ -19,16 +19,40 @@ const prisma = new PrismaClient();
 const TIMEZONE = process.env.HOSPITAL_TIMEZONE ?? "Asia/Kolkata";
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? "Admin@12345";
 const SEED_TAG = "[seed]";
+/** `db:seed:demo` passes this flag; plain `db:seed` keeps the general fixture. */
+const DEMO_MODE = process.argv.includes("--demo");
+
+type SeedAppointment = {
+  doctorIndex: number;
+  patientIndex: number;
+  slotStartMinute: number;
+  status: AppointmentStatus;
+  source?: "QR" | "REMOTE" | "WALK_IN";
+  withQueue?: boolean;
+  notes?: string;
+  /** Demo-only: recorded duration for a finished consultation. */
+  completedSeconds?: number;
+};
+
+type CreatedAppointment = {
+  id: string;
+  patientId: string;
+  status: AppointmentStatus;
+  doctorIndex: number;
+  tokenNumber: number;
+  queueEntryId?: string;
+};
 
 /**
  * Demo data for local development.
  *
  * Idempotency: structural rows (users, departments, doctors, schedules) are
  * upserted; demo-day appointments are tagged "[seed]" and recreated on every
- * run so the fixture never accumulates stale duplicates.
+ * run so the fixture never accumulates stale duplicates. `--demo` selects the
+ * guided mid-flow fixture (see docs/demo.md) and seeds its history as well.
  */
 async function main() {
-  console.log(`Seeding Waitless demo data (timezone: ${TIMEZONE})`);
+  console.log(`Seeding Waitless ${DEMO_MODE ? "guided demo" : "general"} data (timezone: ${TIMEZONE})`);
 
   const passwordHash = await hash(ADMIN_PASSWORD);
 
@@ -271,28 +295,34 @@ async function main() {
   const demoDay = nextWorkingDay(today);
   const now = new Date();
 
-  await prisma.appointment.deleteMany({
-    where: { serviceDay: demoDay, notes: { startsWith: SEED_TAG } },
-  });
   const historyDay = previousWorkingDay(today);
-  await prisma.appointment.deleteMany({
-    where: { serviceDay: historyDay, notes: { startsWith: SEED_TAG } },
+  const taggedDays = [...new Set([demoDay, historyDay])];
+  const taggedAppointments = await prisma.appointment.findMany({
+    where: { OR: taggedDays.map((serviceDay) => ({ serviceDay, notes: { startsWith: SEED_TAG } })) },
+    select: { id: true },
   });
+  const taggedAppointmentIds = taggedAppointments.map((row) => row.id);
+  const taggedQueueEntries = await prisma.queueEntry.findMany({
+    where: { appointmentId: { in: taggedAppointmentIds } },
+    select: { id: true },
+  });
+  const taggedQueueEntryIds = taggedQueueEntries.map((row) => row.id);
+  // Notifications/audit rows have no FK to the seeded appointments, so remove
+  // them first to avoid accumulating duplicates on repeated seeds.
+  await prisma.notification.deleteMany({ where: { appointmentId: { in: taggedAppointmentIds } } });
+  await prisma.auditLog.deleteMany({
+    where: {
+      entity: { in: ["Appointment", "QueueEntry"] },
+      entityId: { in: [...taggedAppointmentIds, ...taggedQueueEntryIds] },
+    },
+  });
+  await prisma.appointment.deleteMany({ where: { id: { in: taggedAppointmentIds } } });
 
   const tokenCounters = new Map<string, number>();
   const positionCounters = new Map<string, number>();
 
-  type SeedAppointment = {
-    doctorIndex: number;
-    patientIndex: number;
-    slotStartMinute: number;
-    status: AppointmentStatus;
-    source?: "QR" | "REMOTE" | "WALK_IN";
-    withQueue?: boolean;
-    notes?: string;
-  };
-
-  const demoAppointments: SeedAppointment[] = [
+  /** Standard local fixture used by `pnpm db:seed`. */
+  const generalAppointments: SeedAppointment[] = [
     // Dr. Anita Rao — busy clinic mid-flow (positions 1..6)
     { doctorIndex: 0, patientIndex: 1, slotStartMinute: 540, status: "COMPLETED", withQueue: true },
     { doctorIndex: 0, patientIndex: 2, slotStartMinute: 555, status: "COMPLETED", withQueue: true },
@@ -323,9 +353,40 @@ async function main() {
     { doctorIndex: 7, patientIndex: 2, slotStartMinute: 1020, status: "BOOKED" },
   ];
 
-  const created: Array<{ id: string; patientId: string; status: AppointmentStatus }> = [];
+  /**
+   * Guided fixture for `pnpm db:seed:demo` (docs/demo.md):
+   * Dr. Rao tokens 1-2 COMPLETED, 3 IN_CONSULTATION, 4 CALLED, 5-6 WAITING;
+   * Dr. Menon DELAYED/WAITING/NOTIFIED/BOOKED. Totals: 6 still waiting,
+   * 1 in consultation, 1 delayed.
+   */
+  const demoAppointments: SeedAppointment[] = [
+    { doctorIndex: 0, patientIndex: 1, slotStartMinute: 540, status: "COMPLETED", withQueue: true, notes: "demo token 1", completedSeconds: 9 * 60 },
+    { doctorIndex: 0, patientIndex: 2, slotStartMinute: 555, status: "COMPLETED", withQueue: true, notes: "demo token 2", completedSeconds: 11 * 60 },
+    { doctorIndex: 0, patientIndex: 0, slotStartMinute: 570, status: "IN_CONSULTATION", withQueue: true, notes: "demo token 3" },
+    { doctorIndex: 0, patientIndex: 3, slotStartMinute: 585, status: "CALLED", withQueue: true, notes: "demo token 4" },
+    { doctorIndex: 0, patientIndex: 4, slotStartMinute: 600, status: "WAITING", withQueue: true, notes: "demo token 5" },
+    { doctorIndex: 0, patientIndex: 5, slotStartMinute: 615, status: "WAITING", withQueue: true, notes: "demo token 6" },
 
-  for (const seed of demoAppointments) {
+    { doctorIndex: 1, patientIndex: 3, slotStartMinute: 540, status: "DELAYED", withQueue: true, notes: "demo delayed" },
+    { doctorIndex: 1, patientIndex: 4, slotStartMinute: 555, status: "WAITING", withQueue: true, notes: "demo waiting" },
+    { doctorIndex: 1, patientIndex: 5, slotStartMinute: 570, status: "NOTIFIED", withQueue: true, notes: "demo notified" },
+    { doctorIndex: 1, patientIndex: 1, slotStartMinute: 585, status: "BOOKED", notes: "demo swap candidate" },
+
+    // Three more waiting visits bring the documented demo total to six.
+    { doctorIndex: 2, patientIndex: 0, slotStartMinute: 540, status: "WAITING", withQueue: true, notes: "demo waiting" },
+    { doctorIndex: 3, patientIndex: 4, slotStartMinute: 540, status: "WAITING", withQueue: true, notes: "demo waiting", source: "QR" },
+    { doctorIndex: 4, patientIndex: 3, slotStartMinute: 540, status: "WAITING", withQueue: true, notes: "demo waiting", source: "QR" },
+
+    { doctorIndex: 2, patientIndex: 2, slotStartMinute: 555, status: "BOOKED" },
+    { doctorIndex: 5, patientIndex: 1, slotStartMinute: 1020, status: "BOOKED" },
+    { doctorIndex: 6, patientIndex: 5, slotStartMinute: 1020, status: "BOOKED" },
+    { doctorIndex: 7, patientIndex: 2, slotStartMinute: 1020, status: "BOOKED" },
+  ];
+
+  const appointmentSeeds = DEMO_MODE ? demoAppointments : generalAppointments;
+  const created: CreatedAppointment[] = [];
+
+  for (const seed of appointmentSeeds) {
     const doctor = doctors[seed.doctorIndex];
     const patient = patients[seed.patientIndex];
     if (!doctor || !patient) throw new Error("Seed index out of range");
@@ -352,7 +413,14 @@ async function main() {
         checkedInAt: seed.withQueue ? new Date(now.getTime() - 20 * 60_000) : null,
       },
     });
-    created.push({ id: appointment.id, patientId: patient.id, status: seed.status });
+    const record: CreatedAppointment = {
+      id: appointment.id,
+      patientId: patient.id,
+      status: seed.status,
+      doctorIndex: seed.doctorIndex,
+      tokenNumber,
+    };
+    created.push(record);
 
     if (!seed.withQueue) continue;
 
@@ -382,6 +450,8 @@ async function main() {
       },
     });
 
+    record.queueEntryId = queueEntry.id;
+
     if (seed.status === "IN_CONSULTATION") {
       await prisma.consultation.create({
         data: {
@@ -390,6 +460,33 @@ async function main() {
           startedByUserId: staff.id,
         },
       });
+    } else if (seed.status === "COMPLETED" && seed.completedSeconds) {
+      // The guided demo's finished tokens show a realistic rolling average.
+      const endedAt = new Date(now.getTime() - 15 * 60_000);
+      await prisma.consultation.create({
+        data: {
+          queueEntryId: queueEntry.id,
+          startedAt: new Date(endedAt.getTime() - seed.completedSeconds * 1000),
+          endedAt,
+          endSource: "STAFF",
+          durationSeconds: seed.completedSeconds,
+          startedByUserId: staff.id,
+        },
+      });
+    }
+  }
+
+  if (DEMO_MODE) {
+    await seedDemoHistory(created, staff.id, now);
+
+    const flowCounts = {
+      waiting: created.filter((appointment) => appointment.status === "WAITING").length,
+      inConsultation: created.filter((appointment) => appointment.status === "IN_CONSULTATION").length,
+      delayed: created.filter((appointment) => appointment.status === "DELAYED").length,
+    };
+    console.log(`Demo flow: ${JSON.stringify(flowCounts)}`);
+    if (flowCounts.waiting !== 6 || flowCounts.inConsultation !== 1 || flowCounts.delayed !== 1) {
+      throw new Error(`Demo fixture flow counts are wrong: ${JSON.stringify(flowCounts)}`);
     }
   }
 
@@ -434,7 +531,7 @@ async function main() {
         status: "SENT",
         sentAt: new Date(now.getTime() - 90 * 60_000),
         dedupeKey: `booking:${primary.id}`,
-        data: { appointmentId: primary.id },
+        data: { appointmentId: primary.id, tag: SEED_TAG },
       },
     });
     await prisma.notification.upsert({
@@ -450,6 +547,7 @@ async function main() {
         status: "SENT",
         sentAt: new Date(now.getTime() - 35 * 60_000),
         dedupeKey: `ready30:${primary.id}`,
+        data: { appointmentId: primary.id, tag: SEED_TAG },
       },
     });
   }
@@ -486,6 +584,91 @@ async function main() {
   console.log(`Seeded: ${JSON.stringify(counts)}`);
   console.log(`Admin login: ${admin.email} / ${ADMIN_PASSWORD}`);
   console.log(`Front desk login: ${staff.email} / ${ADMIN_PASSWORD}`);
+}
+
+/** Adds realistic (but tagged) queue history for the guided demo fixture. */
+async function seedDemoHistory(
+  created: CreatedAppointment[],
+  actorUserId: string,
+  now: Date,
+): Promise<void> {
+  type QueueAction = "QUEUE_CALLED" | "QUEUE_STARTED" | "QUEUE_COMPLETED";
+
+  const raoToken = (tokenNumber: number) => {
+    const record = created.find(
+      (appointment) => appointment.doctorIndex === 0 && appointment.tokenNumber === tokenNumber,
+    );
+    if (!record?.queueEntryId) {
+      throw new Error(`Missing demo queue entry for Dr. Rao token ${tokenNumber}`);
+    }
+    return { record, queueEntryId: record.queueEntryId };
+  };
+
+  const writeAudit = async (
+    queueEntryId: string,
+    tokenNumber: number,
+    action: QueueAction,
+    status: string,
+    minutesAgo: number,
+  ) => {
+    await prisma.auditLog.create({
+      data: {
+        actorUserId,
+        action,
+        entity: "QueueEntry",
+        entityId: queueEntryId,
+        after: {
+          tag: SEED_TAG,
+          tokenNumber,
+          status,
+        } as Prisma.InputJsonValue,
+        createdAt: new Date(now.getTime() - minutesAgo * 60_000),
+      },
+    });
+  };
+
+  const token1 = raoToken(1);
+  await writeAudit(token1.queueEntryId, 1, "QUEUE_CALLED", "CALLED", 28);
+  await writeAudit(token1.queueEntryId, 1, "QUEUE_STARTED", "IN_CONSULTATION", 27);
+  await writeAudit(token1.queueEntryId, 1, "QUEUE_COMPLETED", "COMPLETED", 15);
+
+  const token2 = raoToken(2);
+  await writeAudit(token2.queueEntryId, 2, "QUEUE_CALLED", "CALLED", 20);
+  await writeAudit(token2.queueEntryId, 2, "QUEUE_STARTED", "IN_CONSULTATION", 19);
+  await writeAudit(token2.queueEntryId, 2, "QUEUE_COMPLETED", "COMPLETED", 15);
+
+  const token3 = raoToken(3);
+  await writeAudit(token3.queueEntryId, 3, "QUEUE_CALLED", "CALLED", 8);
+  await writeAudit(token3.queueEntryId, 3, "QUEUE_STARTED", "IN_CONSULTATION", 6);
+
+  const token4 = raoToken(4);
+  await writeAudit(token4.queueEntryId, 4, "QUEUE_CALLED", "CALLED", 1);
+
+  const delayed = created.find(
+    (appointment) => appointment.doctorIndex === 1 && appointment.status === "DELAYED",
+  );
+  if (!delayed) throw new Error("Missing demo delayed appointment for Dr. Menon");
+
+  await prisma.notification.upsert({
+    where: { dedupeKey: `seed-delay:${delayed.id}` },
+    update: {},
+    create: {
+      patientId: delayed.patientId,
+      appointmentId: delayed.id,
+      type: "DELAY_WARNING",
+      channel: "IN_APP",
+      title: "Running behind schedule",
+      body: "Your consultation is delayed. Please check in with the front desk.",
+      status: "SENT",
+      sentAt: new Date(now.getTime() - 5 * 60_000),
+      dedupeKey: `seed-delay:${delayed.id}`,
+      data: {
+        tag: SEED_TAG,
+        appointmentId: delayed.id,
+        tokenNumber: delayed.tokenNumber,
+      } as Prisma.InputJsonValue,
+    },
+  });
 }
 
 function nextWorkingDay(startDay: string): string {

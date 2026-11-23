@@ -4,11 +4,13 @@ import { AdminLayout } from "@/layouts/AdminLayout";
 import { PatientLayout } from "@/layouts/PatientLayout";
 import { PublicLayout } from "@/layouts/PublicLayout";
 import { AdminAppointmentsPage } from "@/pages/admin/Appointments";
+import { AuditPage } from "@/pages/admin/Audit";
 import { AdminDashboardPage } from "@/pages/admin/Dashboard";
 import { DepartmentsPage } from "@/pages/admin/Departments";
 import { DoctorsPage } from "@/pages/admin/Doctors";
 import { PatientsPage } from "@/pages/admin/Patients";
 import { QueueManagementPage } from "@/pages/admin/QueueManagement";
+import { RoomViewPage } from "@/pages/admin/RoomView";
 import { SettingsPage } from "@/pages/admin/Settings";
 import { AdminSwapsPage } from "@/pages/admin/Swaps";
 import { BookAppointmentPage } from "@/pages/patient/BookAppointment";
@@ -21,6 +23,7 @@ import { LoginPage } from "@/pages/public/Login";
 import { NotFoundPage } from "@/pages/public/NotFound";
 import { PatientStartPage } from "@/pages/public/PatientStart";
 import { ScanPage } from "@/pages/public/Scan";
+import { NotificationsPage } from "@/pages/shared/NotificationsPage";
 
 export function App() {
   return (
@@ -39,7 +42,12 @@ export function App() {
           <Route path="appointments" element={<MyAppointmentsPage />} />
           <Route path="queue" element={<QueueStatusPage />} />
           <Route path="swaps" element={<SwapRequestsPage />} />
+          <Route path="notifications" element={<NotificationsPage />} />
         </Route>
+      </Route>
+
+      <Route element={<ProtectedRoute roles={["ADMIN", "STAFF"]} />}>
+        <Route path="admin/room/:doctorId" element={<RoomViewPage />} />
       </Route>
 
       <Route element={<ProtectedRoute roles={["ADMIN", "STAFF"]} />}>
@@ -51,6 +59,8 @@ export function App() {
           <Route path="departments" element={<DepartmentsPage />} />
           <Route path="patients" element={<PatientsPage />} />
           <Route path="swaps" element={<AdminSwapsPage />} />
+          <Route path="audit" element={<AuditPage />} />
+          <Route path="notifications" element={<NotificationsPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Route>

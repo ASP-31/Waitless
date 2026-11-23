@@ -8,6 +8,12 @@ import pinoHttp from "pino-http";
 import { allowedOrigins, env, isProd } from "./config/env";
 import { logger } from "./config/logger";
 import { errorHandler, notFoundHandler } from "./middleware/error-handler";
+import { idempotency } from "./middleware/idempotency";
+import {
+  apiRateLimit,
+  hardwareEventRateLimit,
+  writeRateLimit,
+} from "./middleware/rate-limit";
 import { apiRouter } from "./routes";
 
 export function createApp(): Express {
@@ -54,6 +60,11 @@ export function createApp(): Express {
     }),
   );
 
+  app.use("/api/v1", apiRateLimit, writeRateLimit);
+  app.use("/api/v1/hardware/events", hardwareEventRateLimit);
+  // Before auth so the fingerprint includes the caller's bearer token without
+  // needing to decode it twice; protected routes are matched by path.
+  app.use(idempotency);
   app.use("/api/v1", apiRouter);
 
   app.use(notFoundHandler);

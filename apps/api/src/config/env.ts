@@ -55,7 +55,10 @@ const envSchema = z.object({
   HARDWARE_AUTO_COMPLETE: booleanish("false"),
   AUTO_COMPLETE_DEBOUNCE_MINUTES: z.coerce.number().int().min(1).default(2),
   SENSOR_DEBOUNCE_SECONDS: z.coerce.number().int().min(0).default(5),
+  DEVICE_WATCHDOG_MINUTES: z.coerce.number().int().min(1).default(5),
+  STALE_CONSULTATION_HOURS: z.coerce.number().int().min(1).default(2),
 
+  VAPID_SUBJECT: z.string().default("mailto:admin@waitless.local"),
   FCM_PROJECT_ID: z.string().optional(),
   FCM_CLIENT_EMAIL: z.string().optional(),
   FCM_PRIVATE_KEY: z.string().optional(),

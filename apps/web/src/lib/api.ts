@@ -39,6 +39,11 @@ export function getAccessToken() {
   return accessToken;
 }
 
+/** Absolute path for authenticated non-JSON downloads (CSV exports). */
+export function apiUrl(path: string) {
+  return `${BASE_URL}${path}`;
+}
+
 export function setRefreshHandler(handler: (() => Promise<string | null>) | null) {
   refreshHandler = handler;
 }
@@ -106,11 +111,31 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return payload as T;
 }
 
+const IDEMPOTENT_PATH = /^\/(appointments|swaps)(?:\?|$)/;
+
+/**
+ * Booking and swap POSTs require a stable key so a retry after a timeout (or
+ * after a 401 refresh) cannot create a second appointment/request. The key is
+ * generated once per call and preserved through the refresh retry.
+ */
+function withIdempotencyKey(path: string, options?: RequestOptions): RequestOptions {
+  if (!IDEMPOTENT_PATH.test(path)) return { ...options, method: "POST" };
+  const headers: Record<string, string> = {};
+  new Headers(options?.headers).forEach((value, key) => {
+    headers[key] = value;
+  });
+  if (!Object.keys(headers).some((key) => key.toLowerCase() === "idempotency-key")) {
+    const random = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    headers["Idempotency-Key"] = random;
+  }
+  return { ...options, method: "POST", headers };
+}
+
 export const api = {
   get: <T>(path: string, options?: RequestOptions) =>
     request<T>(path, { ...options, method: "GET" }),
   post: <T>(path: string, body?: unknown, options?: RequestOptions) =>
-    request<T>(path, { ...options, method: "POST", body }),
+    request<T>(path, withIdempotencyKey(path, { ...options, body })),
   put: <T>(path: string, body?: unknown, options?: RequestOptions) =>
     request<T>(path, { ...options, method: "PUT", body }),
   patch: <T>(path: string, body?: unknown, options?: RequestOptions) =>

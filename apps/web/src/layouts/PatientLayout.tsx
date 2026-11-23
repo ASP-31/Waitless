@@ -2,6 +2,7 @@ import { CalendarPlus, Home, ListOrdered, LogOut, Repeat2, Ticket } from "lucide
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Brand } from "@/components/shared/brand";
+import { NotificationBell } from "@/components/shared/notification-bell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/context/auth-context";
@@ -51,6 +52,7 @@ export function PatientLayout() {
             ))}
           </nav>
           <div className="flex items-center gap-2">
+            <NotificationBell />
             <div className="hidden items-center gap-2 sm:flex">
               <span className="text-sm text-muted-foreground">{patientProfile?.fullName ?? "Patient"}</span>
               {patientProfile && !patientProfile.phoneVerified && (

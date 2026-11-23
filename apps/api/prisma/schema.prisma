@@ -328,6 +328,8 @@ model QueueEntry {
   notifiedAt      DateTime?
   calledAt        DateTime?
   graceDeadlineAt DateTime?
+  /** Set once when the patient taps "I'm here"; resets the grace window. */
+  selfCheckInAt   DateTime?
   completedAt     DateTime?
   skippedReason   String?
   createdAt       DateTime          @default(now())
@@ -346,6 +348,8 @@ model Consultation {
   queueEntryId     String                @unique
   startedAt        DateTime              @default(now())
   endedAt          DateTime?
+  /** Set by a VACANT sensor event; staff still confirms the ending. */
+  suggestedEndAt   DateTime?
   endSource        ConsultationEndSource?
   durationSeconds  Int?
   startedByUserId  String?
@@ -392,9 +396,11 @@ model Notification {
 model NotificationPreference {
   id           String   @id @default(cuid())
   patientId    String   @unique
-  pushEnabled  Boolean  @default(true)
-  smsEnabled   Boolean  @default(false)
-  emailEnabled Boolean  @default(false)
+  pushEnabled       Boolean  @default(true)
+  smsEnabled        Boolean  @default(false)
+  emailEnabled      Boolean  @default(false)
+  /** Browser Push subscriptions (web-push-compatible JSON objects). */
+  pushSubscriptions Json?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -479,7 +485,10 @@ model Room {
   code       String    @unique
   name       String
   isActive   Boolean   @default(true)
+  /** ONLINE | DEGRADED — derived from heartbeat freshness by the watchdog. */
+  status     String    @default("ONLINE")
   lastSeenAt DateTime?
+  lastEventAt DateTime?
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
 

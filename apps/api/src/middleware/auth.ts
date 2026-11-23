@@ -96,3 +96,6 @@ export function requireSelf(paramName = "patientId") {
     next();
   };
 }
+
+/** Explicit name for the patient-self guard used by `:patientId` routes. */
+export const requirePatientSelf = requireSelf;

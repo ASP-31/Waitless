@@ -1,55 +1,238 @@
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  verify:
-    name: Lint · typecheck · test · build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+env:
+  CI: true
+  NODE_ENV: test
+  DATABASE_URL: postgresql://waitless:waitless@localhost:5432/waitless
+  REDIS_URL: redis://localhost:6379
+  JWT_ACCESS_SECRET: ci-access-secret-at-least-16-chars
+  JWT_REFRESH_SECRET: ci-refresh-secret-at-least-16-chars
 
+jobs:
+  quality:
+    name: Lint, typecheck, unit tests, build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Enable pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 10.20.0
-
-      - name: Use Node 22
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.12.0
           cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: cp .env.example .env
+      - run: pnpm --filter @waitless/api db:generate
+      - run: pnpm exec turbo run lint typecheck test build
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      # Coverage is informational only: no thresholds are configured and the
+      # steps are non-blocking so a coverage-tool hiccup cannot break CI.
+      - name: Coverage (shared)
+        continue-on-error: true
+        run: pnpm --filter @waitless/shared test:coverage
+      - name: Coverage (api)
+        continue-on-error: true
+        run: pnpm --filter @waitless/api test:coverage
+      - name: Coverage (web)
+        continue-on-error: true
+        run: pnpm --filter @waitless/web test:coverage
+      - name: Print coverage summary
+        if: always()
+        continue-on-error: true
+        run: |
+          node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+            const files = [
+              "packages/shared/coverage/coverage-summary.json",
+              "apps/api/coverage/coverage-summary.json",
+              "apps/web/coverage/coverage-summary.json",
+            ];
+            for (const file of files) {
+              if (!existsSync(file)) continue;
+              const totals = JSON.parse(readFileSync(file, "utf8")).total;
+              console.log(`${file}: lines ${totals.lines.pct}% / statements ${totals.statements.pct}% / branches ${totals.branches.pct}%`);
+            }
+          ' | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage summaries
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-summaries
+          path: |
+            packages/shared/coverage/
+            apps/api/coverage/
+            apps/web/coverage/
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Generate Prisma client
-        # `prisma generate` only needs the schema, not a database.
-        run: pnpm db:generate
+  integration:
+    name: Integration tests (Postgres + Redis)
+    runs-on: ubuntu-latest
+    env:
+      RUN_DB_TESTS: "true"
+      TEST_DATABASE_URL: postgresql://waitless:waitless@localhost:5432/waitless_test?schema=public
+    services:
+      postgres:
+        image: postgres:16-alpine
         env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Test
-        run: pnpm test
-
-      - name: Build
-        run: pnpm build
+          POSTGRES_USER: waitless
+          POSTGRES_PASSWORD: waitless
+          POSTGRES_DB: waitless
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U waitless -d waitless"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Create waitless_test database
         env:
-          DATABASE_URL: postgresql://user:pass@localhost:5432/waitless
-          JWT_ACCESS_SECRET: ci-access-secret-placeholder-32-chars
-          JWT_REFRESH_SECRET: ci-refresh-secret-placeholder-32-chars
+          PGPASSWORD: waitless
+        run: psql -h localhost -U waitless -d postgres -c 'CREATE DATABASE waitless_test;'
+      - name: Configure test environment
+        run: |
+          cp .env.example .env
+          printf 'DATABASE_URL=%s\nTEST_DATABASE_URL=%s\nRUN_DB_TESTS=true\n' \
+            "$TEST_DATABASE_URL" "$TEST_DATABASE_URL" >> .env
+      - run: pnpm --filter @waitless/api db:generate
+      - name: Apply migrations to waitless_test
+        working-directory: apps/api
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: pnpm exec prisma migrate deploy
+      - name: Run API suite with DB-gated tests
+        env:
+          RUN_DB_TESTS: "true"
+          TEST_DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+        run: |
+          set -o pipefail
+          pnpm --filter @waitless/api test --reporter=verbose 2>&1 | tee api-integration.log
+          # Guard against a green run that skipped every DB-backed suite.
+          for pattern in \
+            '✓.*books appointments, conflicts on a taken slot' \
+            '✓.*rejects cross-patient access to appointments, swaps and notifications' \
+            '✓.*accepts only one of two concurrent swap responses' \
+            '✓.*allows only one of two overlapping swap requests'
+          do
+            grep -qE "$pattern" api-integration.log || {
+              echo "DB-gated test did not run: $pattern"
+              exit 1
+            }
+          done
+
+  e2e:
+    name: Playwright E2E (main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      E2E_BASE_URL: http://localhost:5173
+      E2E_SKIP_WEB_SERVER: "true"
+      WEB_ORIGIN: http://localhost:5173
+      API_BASE_URL: http://localhost:4000/api/v1
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: waitless
+          POSTGRES_PASSWORD: waitless
+          POSTGRES_DB: waitless
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U waitless -d waitless"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: cp .env.example .env
+      - run: pnpm --filter @waitless/api db:generate
+      - name: Apply migrations
+        working-directory: apps/api
+        run: pnpm exec prisma migrate deploy
+      - name: Seed demo data
+        run: pnpm db:seed:demo
+      - name: Install Playwright browser
+        run: pnpm --filter @waitless/web exec playwright install --with-deps chromium
+      - name: Start API server
+        run: |
+          nohup pnpm --filter @waitless/api dev > api-e2e.log 2>&1 &
+          echo $! > api-e2e.pid
+      - name: Start web server
+        env:
+          NODE_ENV: development
+        run: |
+          nohup pnpm --filter @waitless/web dev > web-e2e.log 2>&1 &
+          echo $! > web-e2e.pid
+      - name: Wait for servers
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:4000/api/v1/health/ready > /dev/null && curl -fsS http://localhost:5173/ > /dev/null; then
+              echo "API and web servers are ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API server log:"
+          cat api-e2e.log
+          echo "Web server log:"
+          cat web-e2e.log
+          exit 1
+      - name: Run Playwright
+        run: pnpm test:e2e
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            apps/web/e2e-results/
+          if-no-files-found: warn
+          retention-days: 7
